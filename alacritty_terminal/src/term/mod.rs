@@ -964,8 +964,8 @@ impl Term {
             self.reset_url_highlight();
             self.reset_mouse_cursor();
             self.damage = DamageRect::whole_grid(&self.grid);
-            self.dirty = true;
         }
+        self.dirty = true;
     }
 
     #[inline]
