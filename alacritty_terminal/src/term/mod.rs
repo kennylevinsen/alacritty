@@ -671,6 +671,56 @@ impl VisualBell {
     }
 }
 
+#[derive(Clone)]
+pub struct DamageRect {
+    pub x: usize,
+    pub y: usize,
+    pub end_x: usize,
+    pub end_y: usize,
+}
+
+impl DamageRect {
+    #[inline(always)]
+    fn whole_grid<T>(grid: &Grid<T>) -> DamageRect {
+        DamageRect{
+            x: 0,
+            y: 0,
+            end_x: grid.num_cols().0-1,
+            end_y: grid.num_lines().0-1,
+        }
+    }
+
+    #[inline(always)]
+    fn new(p: &Point) -> DamageRect {
+        DamageRect{
+            x: p.col.0,
+            y: p.line.0,
+            end_x: p.col.0,
+            end_y: p.line.0,
+        }
+    }
+
+    #[inline(always)]
+    fn max(&self, other: &DamageRect) -> DamageRect {
+        DamageRect{
+            x: min(self.x, other.x),
+            y: min(self.y, other.y),
+            end_x: max(self.end_x, other.end_x),
+            end_y: max(self.end_y, other.end_y),
+        }
+    }
+
+    #[inline(always)]
+    fn add_point(&self, other: &Point) -> DamageRect {
+        DamageRect{
+            x: min(self.x, other.col.0),
+            y: min(self.y, other.line.0),
+            end_x: max(self.end_x, other.col.0),
+            end_y: max(self.end_y, other.line.0),
+        }
+    }
+}
+
 pub struct Term {
     /// The grid
     grid: Grid<Cell>,
@@ -765,8 +815,14 @@ pub struct Term {
     /// Clipboard access coupled to the active window
     clipboard: Clipboard,
 
+    /// Last selection, stored for damage tracking
+    last_selection: Option<Selection>,
+
+    /// Last URL highlight, stored for damage tracking
+    last_highlight: Option<RangeInclusive<index::Linear>>,
+
     /// Damage that has accumulated since last readout
-    damage: (usize, usize, usize, usize),
+    damage: DamageRect,
 }
 
 /// Terminal size info
@@ -833,11 +889,10 @@ impl Term {
         &self.grid.selection
     }
 
-    #[inline]
-    pub fn damage_selection(&mut self, s: &Option<Selection>) {
+    fn add_selection(&self, s: &Option<Selection>, r: &DamageRect) -> DamageRect {
         let s = match s {
             Some(ref s) => s,
-            None => return,
+            None => return r.clone(),
         };
         if let Some(span) = s.to_span(self) {
             let (limit_start, limit_end) = if span.is_block {
@@ -868,36 +923,32 @@ impl Term {
                 line: index::Line(end.line),
             };
 
-            self.update_damage(start);
-            self.update_damage(end);
+            r.max(&DamageRect{
+                x: start.col.0,
+                y: start.line.0,
+                end_x: end.col.0,
+                end_y: end.line.0,
+            })
+        } else {
+            r.clone()
         }
     }
 
     #[inline]
     pub fn set_selection(&mut self, s: Option<Selection>) {
-        let sel = self.grid.selection.clone();
-        self.damage_selection(&sel);
-        self.damage_selection(&s);
         self.grid.selection = s;
     }
 
     #[inline]
     pub fn clear_selection(&mut self) {
-        if self.grid.selection.is_some() {
-            self.damage_selection(&self.grid.selection.clone());
-        }
         self.grid.selection = None;
     }
 
     #[inline]
     pub fn update_selection(&mut self, point: Point<usize>, side: Side) {
-        let sel = self.grid.selection.clone();
-        self.damage_selection(&sel);
         if let Some(sel) = &mut self.grid.selection {
             sel.update(point, side);
         }
-        let sel = self.grid.selection.clone();
-        self.damage_selection(&sel);
     }
 
     #[inline]
@@ -912,7 +963,7 @@ impl Term {
         if self.grid.display_offset() != old_offset {
             self.reset_url_highlight();
             self.reset_mouse_cursor();
-            self.damage = (0, 0, self.grid.num_cols().0-1, self.grid.num_lines().0-1);
+            self.damage = DamageRect::whole_grid(&self.grid);
             self.dirty = true;
         }
     }
@@ -974,7 +1025,9 @@ impl Term {
             message_buffer,
             should_exit: false,
             clipboard,
-            damage: (0, 0, 0, 0),
+            last_highlight: None,
+            last_selection: None,
+            damage: DamageRect{ x: 0, y: 0, end_x: 0, end_y: 0 },
         }
     }
 
@@ -982,14 +1035,14 @@ impl Term {
         // Saturating addition with minimum font size FONT_SIZE_STEP
         let new_size = self.font_size + Size::new(delta);
         self.font_size = max(new_size, Size::new(FONT_SIZE_STEP));
+        self.damage = DamageRect::whole_grid(&self.grid);
         self.dirty = true;
-        self.damage = (0, 0, self.grid.num_cols().0-1, self.grid.num_lines().0-1);
     }
 
     pub fn reset_font_size(&mut self) {
         self.font_size = self.original_font_size;
+        self.damage = DamageRect::whole_grid(&self.grid);
         self.dirty = true;
-        self.damage = (0, 0, self.grid.num_cols().0-1, self.grid.num_lines().0-1);
     }
 
     pub fn update_config(&mut self, config: &Config) {
@@ -1014,25 +1067,17 @@ impl Term {
         self.dirty
     }
 
-    #[inline(always)]
-    fn update_damage(&mut self, point: Point) {
-        let (col, line) = (point.col.0, point.line.0);
-        self.damage = (
-            min(self.damage.0, col),
-            min(self.damage.1, line),
-            max(self.damage.2, col),
-            max(self.damage.3, line));
-    }
+    pub fn get_damage(&mut self) -> DamageRect {
+        let mut r = self.damage.add_point(&self.cursor.point);
+        r = self.add_selection(&self.last_selection, &r);
+        r = self.add_selection(&self.grid.selection, &r);
+        r = self.add_highlight(self.grid.num_cols(), &self.last_highlight, &r);
+        r = self.add_highlight(self.grid.num_cols(), &self.grid.url_highlight, &r);
+        self.damage = DamageRect::new(&self.cursor.point);
+        self.last_selection = self.grid.selection.clone();
+        self.last_highlight = self.grid.url_highlight.clone();
 
-    pub fn get_damage(&mut self) -> (usize, usize, usize, usize) {
-        self.update_damage(self.cursor.point);
-        let damage = self.damage;
-        self.damage = (
-            self.cursor.point.col.0,
-            self.cursor.point.line.0,
-            self.cursor.point.col.0,
-            self.cursor.point.line.0);
-        damage
+        r
     }
 
     pub fn selection_to_string(&self) -> Option<String> {
@@ -1293,7 +1338,7 @@ impl Term {
 
         // Recreate tabs list
         self.tabs = TabStops::new(self.grid.num_cols(), self.tabspaces);
-        self.damage = (0, 0, self.grid.num_cols().0-1, self.grid.num_lines().0-1);
+        self.damage = DamageRect::whole_grid(&self.grid)
     }
 
     #[inline]
@@ -1319,7 +1364,7 @@ impl Term {
 
         self.alt = !self.alt;
         ::std::mem::swap(&mut self.grid, &mut self.alt_grid);
-        self.damage = (0, 0, self.grid.num_cols().0-1, self.grid.num_lines().0-1);
+        self.damage = DamageRect::whole_grid(&self.grid)
     }
 
     /// Scroll screen down
@@ -1336,7 +1381,7 @@ impl Term {
         let mut template = self.cursor.template;
         template.flags = Flags::empty();
         self.grid.scroll_down(&(origin..self.scroll_region.end), lines, &template);
-        self.damage = (0, 0, self.grid.num_cols().0-1, self.grid.num_lines().0-1);
+        self.damage = DamageRect::whole_grid(&self.grid)
     }
 
     /// Scroll screen up
@@ -1352,7 +1397,7 @@ impl Term {
         let mut template = self.cursor.template;
         template.flags = Flags::empty();
         self.grid.scroll_up(&(origin..self.scroll_region.end), lines, &template);
-        self.damage = (0, 0, self.grid.num_cols().0-1, self.grid.num_lines().0-1);
+        self.damage = DamageRect::whole_grid(&self.grid)
     }
 
     fn deccolm(&mut self) {
@@ -1391,23 +1436,33 @@ impl Term {
         self.should_exit
     }
 
-    #[inline]
-    pub fn damage_highlight(&mut self, hl: RangeInclusive<index::Linear>) {
-        let (start, end) = hl.into_inner();
-        let (start, end) = (start.to_point(self.grid.num_cols()), end.to_point(self.grid.num_cols()));
+    pub fn add_highlight(&self, cols: index::Column, hl: &Option<RangeInclusive<index::Linear>>, r: &DamageRect) -> DamageRect {
+        if let Some(hl) = hl {
+            let (start, end) = hl.clone().into_inner();
+            let (start, end) = (start.to_point(cols), end.to_point(cols));
 
-        if start.line == end.line {
-            self.update_damage(Point{line: start.line, col: start.col});
-            self.update_damage(Point{line: start.line, col: end.col});
+            if start.line == end.line {
+                r.max(&DamageRect{
+                    x: start.col.0,
+                    y: start.line.0,
+                    end_x: end.col.0,
+                    end_y: end.line.0,
+                })
+            } else {
+                r.max(&DamageRect{
+                    x: 0,
+                    y: start.line.0,
+                    end_x: cols.0-1,
+                    end_y: end.line.0,
+                })
+            }
         } else {
-            self.update_damage(Point{line: start.line, col: index::Column(0)});
-            self.update_damage(Point{line: end.line, col: self.grid.num_cols()});
+            r.clone()
         }
     }
 
     #[inline]
     pub fn set_url_highlight(&mut self, hl: RangeInclusive<index::Linear>) {
-        self.damage_highlight(hl.clone());
         self.grid.url_highlight = Some(hl);
     }
 
@@ -1425,10 +1480,6 @@ impl Term {
 
     #[inline]
     pub fn reset_url_highlight(&mut self) {
-        if self.grid.url_highlight.is_some() {
-            let hl = self.grid.url_highlight.as_ref().unwrap().clone();
-            self.damage_highlight(hl);
-        }
         self.grid.url_highlight = None;
         self.dirty = true;
     }
@@ -1599,8 +1650,12 @@ impl ansi::Handler for Term {
                     ptr::copy(src, dst, (num_cols - col - width).0);
                 }
 
-                self.update_damage(Point{line: self.cursor.point.line, col: col});
-                self.update_damage(Point{line: self.cursor.point.line, col: col+width});
+                self.damage = self.damage.max(&DamageRect{
+                    x: col.0,
+                    y: self.cursor.point.line.0,
+                    end_x: num_cols.0,
+                    end_y: self.cursor.point.line.0,
+                })
             }
 
             // Handle zero-width characters
@@ -1621,18 +1676,17 @@ impl ansi::Handler for Term {
             // Handle wide chars
             if width == 2 {
                 cell.flags.insert(cell::Flags::WIDE_CHAR);
-                self.update_damage(self.cursor.point);
 
                 if self.cursor.point.col + 1 < num_cols {
+                    self.damage = self.damage.add_point(&self.cursor.point);
                     self.cursor.point.col += 1;
                     let spacer = &mut self.grid[&self.cursor.point];
                     *spacer = self.cursor.template;
                     spacer.flags.insert(cell::Flags::WIDE_CHAR_SPACER);
-                    self.update_damage(self.cursor.point);
                 }
-            } else {
-                self.update_damage(self.cursor.point);
             }
+
+            self.damage = self.damage.add_point(&self.cursor.point);
         }
 
         if (self.cursor.point.col + 1) < self.grid.num_cols() {
@@ -1702,8 +1756,12 @@ impl ansi::Handler for Term {
         for c in &mut line[source..destination] {
             c.reset(&template);
         }
-        self.update_damage(Point{line: self.cursor.point.line, col: source});
-        self.update_damage(Point{line: self.cursor.point.line, col: destination+num_cells});
+        self.damage = self.damage.max(&DamageRect{
+            x: source.0,
+            y: self.cursor.point.line.0,
+            end_x: (destination+num_cells).0,
+            end_y: self.cursor.point.line.0,
+        })
     }
 
     #[inline]
@@ -1779,8 +1837,8 @@ impl ansi::Handler for Term {
             let cell = &mut self.grid[&self.cursor.point];
             if cell.c == ' ' {
                 cell.c = self.cursor.charsets[self.active_charset].map('\t');
+                self.damage = self.damage.add_point(&self.cursor.point);
             }
-            self.update_damage(self.cursor.point);
 
             loop {
                 if (self.cursor.point.col + 1) == self.grid.num_cols() {
@@ -1920,6 +1978,13 @@ impl ansi::Handler for Term {
         for c in &mut row[start..end] {
             c.reset(&template);
         }
+
+        self.damage = self.damage.max(&DamageRect{
+            x: start.0,
+            y: self.cursor.point.line.0,
+            end_x: end.0,
+            end_y: self.cursor.point.line.0,
+        })
     }
 
     #[inline]
@@ -1948,8 +2013,13 @@ impl ansi::Handler for Term {
         for c in &mut line[end..] {
             c.reset(&template);
         }
-        self.update_damage(Point{line: self.cursor.point.line, col: start});
-        self.update_damage(Point{line: self.cursor.point.line, col: start+n});
+
+        self.damage = self.damage.max(&DamageRect{
+            x: start.0,
+            y: self.cursor.point.line.0,
+            end_x: (end+n).0,
+            end_y: self.cursor.point.line.0,
+        })
     }
 
     #[inline]
@@ -2005,18 +2075,36 @@ impl ansi::Handler for Term {
                 for cell in &mut row[col..] {
                     cell.reset(&template);
                 }
+                self.damage = self.damage.max(&DamageRect{
+                    x: col.0,
+                    y: self.cursor.point.line.0,
+                    end_x: self.grid.num_cols().0,
+                    end_y: self.cursor.point.line.0,
+                })
             },
             ansi::LineClearMode::Left => {
                 let row = &mut self.grid[self.cursor.point.line];
                 for cell in &mut row[..=col] {
                     cell.reset(&template);
                 }
+                self.damage = self.damage.max(&DamageRect{
+                    x: 0,
+                    y: self.cursor.point.line.0,
+                    end_x: col.0,
+                    end_y: self.cursor.point.line.0,
+                })
             },
             ansi::LineClearMode::All => {
                 let row = &mut self.grid[self.cursor.point.line];
                 for cell in &mut row[..] {
                     cell.reset(&template);
                 }
+                self.damage = self.damage.max(&DamageRect{
+                    x: 0,
+                    y: self.cursor.point.line.0,
+                    end_x: self.grid.num_cols().0,
+                    end_y: self.cursor.point.line.0,
+                })
             },
         }
     }
@@ -2093,6 +2181,7 @@ impl ansi::Handler for Term {
             },
             ansi::ClearMode::Saved => self.grid.clear_history(),
         }
+        self.damage = DamageRect::whole_grid(&self.grid);
     }
 
     #[inline]
@@ -2107,6 +2196,7 @@ impl ansi::Handler for Term {
                 self.tabs.clear_all();
             },
         }
+        self.damage = DamageRect::whole_grid(&self.grid);
     }
 
     // Reset all important fields in the term struct
@@ -2131,6 +2221,7 @@ impl ansi::Handler for Term {
         self.grid.reset(&Cell::default());
         self.alt_grid.reset(&Cell::default());
         self.scroll_region = Line(0)..self.grid.num_lines();
+        self.damage = DamageRect::whole_grid(&self.grid);
     }
 
     #[inline]

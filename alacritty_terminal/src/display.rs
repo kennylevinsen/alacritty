@@ -31,7 +31,7 @@ use crate::renderer::rects::{RenderLines, RenderRect};
 use crate::renderer::{self, GlyphCache, QuadRenderer};
 use crate::sync::FairMutex;
 use crate::term::color::Rgb;
-use crate::term::{RenderableCell, SizeInfo, Term};
+use crate::term::{RenderableCell, DamageRect, SizeInfo, Term};
 use crate::window::{self, Window};
 use font::{self, Rasterize};
 
@@ -478,17 +478,17 @@ impl Display {
         let size_info = *terminal.size_info();
 
         // Check grid damage
-        let damage_rects: Vec<Rect> = if self.damage_supported {
-            let (x, y, endx, endy) = terminal.get_damage();
-            let (endx, endy) = (endx+1, endy+1);
-            vec![Rect{
+        let mut damage = if self.damage_supported {
+            let DamageRect{x, y, end_x, end_y} = terminal.get_damage();
+            let (end_x, end_y) = (end_x+1, end_y+1);
+            Some(Rect{
                 x: (x as u32 * size_info.cell_width as u32) + 2,
-                y: size_info.height as u32 - (endy as u32 * size_info.cell_height as u32) - 2,
-                width: ((endx-x) as u32 * size_info.cell_width as u32),
-                height: ((endy-y) as u32 * size_info.cell_height as u32),
-            }]
+                y: size_info.height as u32 - (end_y as u32 * size_info.cell_height as u32) - 2,
+                width: ((end_x-x) as u32 * size_info.cell_width as u32),
+                height: ((end_y-y) as u32 * size_info.cell_height as u32),
+            })
         } else {
-            vec![]
+            None
         };
 
         let visual_bell_intensity = terminal.visual_bell.intensity();
@@ -588,6 +588,13 @@ impl Display {
                     });
                     offset += 1;
                 }
+
+                damage = Some(Rect{
+                    x: 0,
+                    y: 0,
+                    width: size_info.width as u32,
+                    height: size_info.height as u32,
+                });
             } else {
                 // Draw rectangles
                 self.renderer.draw_rects(config, &size_info, visual_bell_intensity, rects);
@@ -603,8 +610,8 @@ impl Display {
             }
         }
 
-        if damage_rects.len() > 0 {
-            self.window.swap_buffers_with_damage(&damage_rects).expect("swap buffers");
+        if let Some(damage) = damage {
+            self.window.swap_buffers_with_damage(&[damage]).expect("swap buffers");
         } else {
             self.window.swap_buffers().expect("swap buffers");
         }
