@@ -26,7 +26,7 @@ use glutin::os::unix::{EventsLoopExt, WindowExt};
 use glutin::Icon;
 use glutin::{
     self, ContextBuilder, ControlFlow, Event, EventsLoop, MouseCursor, PossiblyCurrent,
-    WindowBuilder,
+    WindowBuilder, Rect,
 };
 #[cfg(not(target_os = "macos"))]
 use image::ImageFormat;
@@ -209,6 +209,11 @@ impl Window {
     #[inline]
     pub fn swap_buffers(&self) -> Result<()> {
         self.windowed_context.swap_buffers().map_err(From::from)
+    }
+
+    #[inline]
+    pub fn swap_buffers_with_damage(&self, rects: &[Rect]) -> Result<()> {
+        self.windowed_context.swap_buffers_with_damage(rects).map_err(From::from)
     }
 
     /// Poll for any available events

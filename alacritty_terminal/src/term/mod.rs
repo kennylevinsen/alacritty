@@ -32,7 +32,7 @@ use crate::cursor::CursorKey;
 use crate::grid::{
     BidirectionalIterator, DisplayIter, Grid, GridCell, IndexRegion, Indexed, Scroll,
 };
-use crate::index::{self, Column, Contains, IndexRange, Line, Linear, Point};
+use crate::index::{self, Column, Contains, IndexRange, Line, Linear, Point, Side};
 use crate::input::FONT_SIZE_STEP;
 use crate::message_bar::MessageBuffer;
 use crate::selection::{self, Selection, SelectionRange, Span};
@@ -764,6 +764,9 @@ pub struct Term {
 
     /// Clipboard access coupled to the active window
     clipboard: Clipboard,
+
+    /// Damage that has accumulated since last readout
+    damage: (usize, usize, usize, usize),
 }
 
 /// Terminal size info
@@ -830,8 +833,71 @@ impl Term {
         &self.grid.selection
     }
 
-    pub fn selection_mut(&mut self) -> &mut Option<Selection> {
-        &mut self.grid.selection
+    #[inline]
+    pub fn damage_selection(&mut self, s: &Option<Selection>) {
+        let s = match s {
+            Some(ref s) => s,
+            None => return,
+        };
+        if let Some(span) = s.to_span(self) {
+            let (limit_start, limit_end) = if span.is_block {
+                (span.end.col, span.start.col)
+            } else {
+                (Column(0), self.cols() - 1)
+            };
+
+            // Get on-screen lines of the selection's locations
+            let mut start = self.buffer_to_visible(span.start);
+            let mut end = self.buffer_to_visible(span.end);
+
+            // Start and end lines are swapped as we switch from buffer to line coordinates
+            if start > end {
+                mem::swap(&mut start, &mut end);
+            }
+
+            // Trim start/end with partially visible block selection
+            start.col = max(limit_start, start.col);
+            end.col = min(limit_end, end.col);
+
+            let start = Point{
+                col: start.col,
+                line: index::Line(start.line),
+            };
+            let end = Point{
+                col: end.col,
+                line: index::Line(end.line),
+            };
+
+            self.update_damage(start);
+            self.update_damage(end);
+        }
+    }
+
+    #[inline]
+    pub fn set_selection(&mut self, s: Option<Selection>) {
+        let sel = self.grid.selection.clone();
+        self.damage_selection(&sel);
+        self.damage_selection(&s);
+        self.grid.selection = s;
+    }
+
+    #[inline]
+    pub fn clear_selection(&mut self) {
+        if self.grid.selection.is_some() {
+            self.damage_selection(&self.grid.selection.clone());
+        }
+        self.grid.selection = None;
+    }
+
+    #[inline]
+    pub fn update_selection(&mut self, point: Point<usize>, side: Side) {
+        let sel = self.grid.selection.clone();
+        self.damage_selection(&sel);
+        if let Some(sel) = &mut self.grid.selection {
+            sel.update(point, side);
+        }
+        let sel = self.grid.selection.clone();
+        self.damage_selection(&sel);
     }
 
     #[inline]
@@ -841,10 +907,14 @@ impl Term {
 
     #[inline]
     pub fn scroll_display(&mut self, scroll: Scroll) {
+        let old_offset = self.grid.display_offset();
         self.grid.scroll_display(scroll);
-        self.reset_url_highlight();
-        self.reset_mouse_cursor();
-        self.dirty = true;
+        if self.grid.display_offset() != old_offset {
+            self.reset_url_highlight();
+            self.reset_mouse_cursor();
+            self.damage = (0, 0, self.grid.num_cols().0-1, self.grid.num_lines().0-1);
+            self.dirty = true;
+        }
     }
 
     #[inline]
@@ -904,6 +974,7 @@ impl Term {
             message_buffer,
             should_exit: false,
             clipboard,
+            damage: (0, 0, 0, 0),
         }
     }
 
@@ -912,11 +983,13 @@ impl Term {
         let new_size = self.font_size + Size::new(delta);
         self.font_size = max(new_size, Size::new(FONT_SIZE_STEP));
         self.dirty = true;
+        self.damage = (0, 0, self.grid.num_cols().0-1, self.grid.num_lines().0-1);
     }
 
     pub fn reset_font_size(&mut self) {
         self.font_size = self.original_font_size;
         self.dirty = true;
+        self.damage = (0, 0, self.grid.num_cols().0-1, self.grid.num_lines().0-1);
     }
 
     pub fn update_config(&mut self, config: &Config) {
@@ -939,6 +1012,27 @@ impl Term {
     #[inline]
     pub fn needs_draw(&self) -> bool {
         self.dirty
+    }
+
+    #[inline(always)]
+    fn update_damage(&mut self, point: Point) {
+        let (col, line) = (point.col.0, point.line.0);
+        self.damage = (
+            min(self.damage.0, col),
+            min(self.damage.1, line),
+            max(self.damage.2, col),
+            max(self.damage.3, line));
+    }
+
+    pub fn get_damage(&mut self) -> (usize, usize, usize, usize) {
+        self.update_damage(self.cursor.point);
+        let damage = self.damage;
+        self.damage = (
+            self.cursor.point.col.0,
+            self.cursor.point.line.0,
+            self.cursor.point.col.0,
+            self.cursor.point.line.0);
+        damage
     }
 
     pub fn selection_to_string(&self) -> Option<String> {
@@ -1199,6 +1293,7 @@ impl Term {
 
         // Recreate tabs list
         self.tabs = TabStops::new(self.grid.num_cols(), self.tabspaces);
+        self.damage = (0, 0, self.grid.num_cols().0-1, self.grid.num_lines().0-1);
     }
 
     #[inline]
@@ -1224,6 +1319,7 @@ impl Term {
 
         self.alt = !self.alt;
         ::std::mem::swap(&mut self.grid, &mut self.alt_grid);
+        self.damage = (0, 0, self.grid.num_cols().0-1, self.grid.num_lines().0-1);
     }
 
     /// Scroll screen down
@@ -1240,6 +1336,7 @@ impl Term {
         let mut template = self.cursor.template;
         template.flags = Flags::empty();
         self.grid.scroll_down(&(origin..self.scroll_region.end), lines, &template);
+        self.damage = (0, 0, self.grid.num_cols().0-1, self.grid.num_lines().0-1);
     }
 
     /// Scroll screen up
@@ -1255,6 +1352,7 @@ impl Term {
         let mut template = self.cursor.template;
         template.flags = Flags::empty();
         self.grid.scroll_up(&(origin..self.scroll_region.end), lines, &template);
+        self.damage = (0, 0, self.grid.num_cols().0-1, self.grid.num_lines().0-1);
     }
 
     fn deccolm(&mut self) {
@@ -1294,7 +1392,22 @@ impl Term {
     }
 
     #[inline]
+    pub fn damage_highlight(&mut self, hl: RangeInclusive<index::Linear>) {
+        let (start, end) = hl.into_inner();
+        let (start, end) = (start.to_point(self.grid.num_cols()), end.to_point(self.grid.num_cols()));
+
+        if start.line == end.line {
+            self.update_damage(Point{line: start.line, col: start.col});
+            self.update_damage(Point{line: start.line, col: end.col});
+        } else {
+            self.update_damage(Point{line: start.line, col: index::Column(0)});
+            self.update_damage(Point{line: end.line, col: self.grid.num_cols()});
+        }
+    }
+
+    #[inline]
     pub fn set_url_highlight(&mut self, hl: RangeInclusive<index::Linear>) {
+        self.damage_highlight(hl.clone());
         self.grid.url_highlight = Some(hl);
     }
 
@@ -1312,6 +1425,10 @@ impl Term {
 
     #[inline]
     pub fn reset_url_highlight(&mut self) {
+        if self.grid.url_highlight.is_some() {
+            let hl = self.grid.url_highlight.as_ref().unwrap().clone();
+            self.damage_highlight(hl);
+        }
         self.grid.url_highlight = None;
         self.dirty = true;
     }
@@ -1481,6 +1598,9 @@ impl ansi::Handler for Term {
                     // memmove
                     ptr::copy(src, dst, (num_cols - col - width).0);
                 }
+
+                self.update_damage(Point{line: self.cursor.point.line, col: col});
+                self.update_damage(Point{line: self.cursor.point.line, col: col+width});
             }
 
             // Handle zero-width characters
@@ -1501,13 +1621,17 @@ impl ansi::Handler for Term {
             // Handle wide chars
             if width == 2 {
                 cell.flags.insert(cell::Flags::WIDE_CHAR);
+                self.update_damage(self.cursor.point);
 
                 if self.cursor.point.col + 1 < num_cols {
                     self.cursor.point.col += 1;
                     let spacer = &mut self.grid[&self.cursor.point];
                     *spacer = self.cursor.template;
                     spacer.flags.insert(cell::Flags::WIDE_CHAR_SPACER);
+                    self.update_damage(self.cursor.point);
                 }
+            } else {
+                self.update_damage(self.cursor.point);
             }
         }
 
@@ -1578,6 +1702,8 @@ impl ansi::Handler for Term {
         for c in &mut line[source..destination] {
             c.reset(&template);
         }
+        self.update_damage(Point{line: self.cursor.point.line, col: source});
+        self.update_damage(Point{line: self.cursor.point.line, col: destination+num_cells});
     }
 
     #[inline]
@@ -1654,6 +1780,7 @@ impl ansi::Handler for Term {
             if cell.c == ' ' {
                 cell.c = self.cursor.charsets[self.active_charset].map('\t');
             }
+            self.update_damage(self.cursor.point);
 
             loop {
                 if (self.cursor.point.col + 1) == self.grid.num_cols() {
@@ -1817,9 +1944,12 @@ impl ansi::Handler for Term {
         // 1 cell.
         let template = self.cursor.template;
         let end = self.size_info.cols() - count;
+
         for c in &mut line[end..] {
             c.reset(&template);
         }
+        self.update_damage(Point{line: self.cursor.point.line, col: start});
+        self.update_damage(Point{line: self.cursor.point.line, col: start+n});
     }
 
     #[inline]
@@ -2248,17 +2378,17 @@ mod tests {
         mem::swap(&mut term.semantic_escape_chars, &mut escape_chars);
 
         {
-            *term.selection_mut() = Some(Selection::semantic(Point { line: 2, col: Column(1) }));
+            term.set_selection(Some(Selection::semantic(Point { line: 2, col: Column(1) })));
             assert_eq!(term.selection_to_string(), Some(String::from("aa")));
         }
 
         {
-            *term.selection_mut() = Some(Selection::semantic(Point { line: 2, col: Column(4) }));
+            term.set_selection(Some(Selection::semantic(Point { line: 2, col: Column(4) })));
             assert_eq!(term.selection_to_string(), Some(String::from("aaa")));
         }
 
         {
-            *term.selection_mut() = Some(Selection::semantic(Point { line: 1, col: Column(1) }));
+            term.set_selection(Some(Selection::semantic(Point { line: 1, col: Column(1) })));
             assert_eq!(term.selection_to_string(), Some(String::from("aaa")));
         }
     }
@@ -2285,7 +2415,7 @@ mod tests {
 
         mem::swap(&mut term.grid, &mut grid);
 
-        *term.selection_mut() = Some(Selection::lines(Point { line: 0, col: Column(3) }));
+        term.set_selection(Some(Selection::lines(Point { line: 0, col: Column(3) })));
         assert_eq!(term.selection_to_string(), Some(String::from("\"aa\"a\n")));
     }
 
@@ -2315,7 +2445,7 @@ mod tests {
 
         let mut selection = Selection::simple(Point { line: 2, col: Column(0) }, Side::Left);
         selection.update(Point { line: 0, col: Column(2) }, Side::Right);
-        *term.selection_mut() = Some(selection);
+        term.set_selection(Some(selection));
         assert_eq!(term.selection_to_string(), Some("aaa\n\naaa\n".into()));
     }
 

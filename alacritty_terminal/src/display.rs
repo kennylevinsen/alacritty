@@ -20,7 +20,7 @@ use std::ffi::c_void;
 use std::sync::mpsc;
 
 use glutin::dpi::{PhysicalPosition, PhysicalSize};
-use glutin::EventsLoop;
+use glutin::{EventsLoop, Rect};
 use parking_lot::MutexGuard;
 
 use crate::config::{Config, StartupMode};
@@ -105,6 +105,7 @@ pub struct Display {
     font_size: font::Size,
     size_info: SizeInfo,
     last_message: Option<Message>,
+    damage_supported: bool,
 }
 
 /// Can wakeup the render loop from other threads
@@ -224,9 +225,18 @@ impl Display {
             api.clear(background_color);
         });
 
-        // We should call `clear` when window is offscreen, so when `window.show()` happens it
-        // would be with background color instead of uninitialized surface.
-        window.swap_buffers()?;
+        // We should call `clear` when window is offscreen, so when
+        // `window.show()` happens it would be with background color instead of
+        // uninitialized surface. We also use this opportunity to see if buffer
+        // damage is supported. Note that empty damage counterintuitively means
+        // "damage everything", so the below is identical to a normal swap.
+        let damage_supported = match window.swap_buffers_with_damage(&[]) {
+            Ok(_) => true,
+            Err(_) => {
+                window.swap_buffers()?;
+                false
+            }
+        };
 
         window.show();
 
@@ -261,6 +271,7 @@ impl Display {
             font_size: config.font.size,
             size_info,
             last_message: None,
+            damage_supported: damage_supported,
         })
     }
 
@@ -463,7 +474,23 @@ impl Display {
     /// This call may block if vsync is enabled
     pub fn draw(&mut self, terminal: &FairMutex<Term>, config: &Config) {
         let mut terminal = terminal.lock();
+
         let size_info = *terminal.size_info();
+
+        // Check grid damage
+        let damage_rects: Vec<Rect> = if self.damage_supported {
+            let (x, y, endx, endy) = terminal.get_damage();
+            let (endx, endy) = (endx+1, endy+1);
+            vec![Rect{
+                x: (x as u32 * size_info.cell_width as u32) + 2,
+                y: size_info.height as u32 - (endy as u32 * size_info.cell_height as u32) - 2,
+                width: ((endx-x) as u32 * size_info.cell_width as u32),
+                height: ((endy-y) as u32 * size_info.cell_height as u32),
+            }]
+        } else {
+            vec![]
+        };
+
         let visual_bell_intensity = terminal.visual_bell.intensity();
         let background_color = terminal.background_color();
         let metrics = self.glyph_cache.font_metrics();
@@ -576,7 +603,12 @@ impl Display {
             }
         }
 
-        self.window.swap_buffers().expect("swap buffers");
+        if damage_rects.len() > 0 {
+            self.window.swap_buffers_with_damage(&damage_rects).expect("swap buffers");
+        } else {
+            self.window.swap_buffers().expect("swap buffers");
+        }
+
     }
 
     pub fn get_window_id(&self) -> Option<usize> {

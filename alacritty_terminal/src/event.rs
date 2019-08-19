@@ -77,7 +77,7 @@ impl<'a, N: Notify + 'a> input::ActionContext for ActionContext<'a, N> {
     }
 
     fn clear_selection(&mut self) {
-        *self.terminal.selection_mut() = None;
+        self.terminal.clear_selection();
         self.terminal.dirty = true;
     }
 
@@ -85,34 +85,31 @@ impl<'a, N: Notify + 'a> input::ActionContext for ActionContext<'a, N> {
         let point = self.terminal.visible_to_buffer(point);
 
         // Update selection if one exists
-        if let Some(ref mut selection) = self.terminal.selection_mut() {
-            selection.update(point, side);
-        }
-
+        self.terminal.update_selection(point, side);
         self.terminal.dirty = true;
     }
 
     fn simple_selection(&mut self, point: Point, side: Side) {
         let point = self.terminal.visible_to_buffer(point);
-        *self.terminal.selection_mut() = Some(Selection::simple(point, side));
+        self.terminal.set_selection(Some(Selection::simple(point, side)));
         self.terminal.dirty = true;
     }
 
     fn block_selection(&mut self, point: Point, side: Side) {
         let point = self.terminal.visible_to_buffer(point);
-        *self.terminal.selection_mut() = Some(Selection::block(point, side));
+        self.terminal.set_selection(Some(Selection::block(point, side)));
         self.terminal.dirty = true;
     }
 
     fn semantic_selection(&mut self, point: Point) {
         let point = self.terminal.visible_to_buffer(point);
-        *self.terminal.selection_mut() = Some(Selection::semantic(point));
+        self.terminal.set_selection(Some(Selection::semantic(point)));
         self.terminal.dirty = true;
     }
 
     fn line_selection(&mut self, point: Point) {
         let point = self.terminal.visible_to_buffer(point);
-        *self.terminal.selection_mut() = Some(Selection::lines(point));
+        self.terminal.set_selection(Some(Selection::lines(point)));
         self.terminal.dirty = true;
     }
 
