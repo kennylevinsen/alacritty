@@ -1077,6 +1077,18 @@ impl Term {
         self.dirty
     }
 
+    /// Retrieve current damage and reset
+    ///
+    /// In order to reduce the performance overhead of tracking damage, damage
+    /// is not tracked by logging the cursor position of every cell update, but
+    /// instead work by looking at cursor progress.
+    ///
+    /// This is done by creating a DamageRect that encapsulates the intial
+    /// cursor position. When damage is read out, the current cursor position
+    /// is added to the rect. Explicit cursor moves and wrap-around also add a
+    /// rect that contains both the cursor before and after the move.
+    ///
+    /// This leaves the normal input path without any damage tracking overhead.
     pub fn get_damage(&mut self) -> DamageRect {
         let cols = self.grid.num_cols();
         let mut r = self.damage.add_point(&self.cursor.point);
@@ -1634,14 +1646,7 @@ impl ansi::Handler for Term {
                 cell.flags.insert(cell::Flags::WRAPLINE);
             }
 
-            if (self.cursor.point.line + 1) >= self.scroll_region.end {
-                self.linefeed();
-            } else {
-                self.cursor.point.line += 1;
-            }
-
-            self.cursor.point.col = Column(0);
-            self.input_needs_wrap = false;
+            self.linefeed_carriage_return();
         }
 
         // Number of cells the char will occupy
@@ -1689,7 +1694,6 @@ impl ansi::Handler for Term {
                 cell.flags.insert(cell::Flags::WIDE_CHAR);
 
                 if self.cursor.point.col + 1 < num_cols {
-                    self.damage = self.damage.add_point(&self.cursor.point);
                     self.cursor.point.col += 1;
                     let spacer = &mut self.grid[&self.cursor.point];
                     *spacer = self.cursor.template;
@@ -1697,7 +1701,6 @@ impl ansi::Handler for Term {
                 }
             }
 
-            self.damage = self.damage.add_point(&self.cursor.point);
         }
 
         if (self.cursor.point.col + 1) < self.grid.num_cols() {
@@ -1725,8 +1728,18 @@ impl ansi::Handler for Term {
             (Line(0), self.grid.num_lines() - 1)
         };
 
-        self.cursor.point.line = min(line + y_offset, max_y);
-        self.cursor.point.col = min(col, self.grid.num_cols() - 1);
+        let new_line = min(line + y_offset, max_y);
+        let new_col = min(col, self.grid.num_cols() - 1);
+
+        self.damage = self.damage.max(&DamageRect{
+            x: min(new_col.0, self.cursor.point.col.0),
+            y: min(new_line.0, self.cursor.point.line.0),
+            end_x: max(new_col.0, self.cursor.point.col.0),
+            end_y: max(new_line.0, self.cursor.point.line.0),
+        });
+
+        self.cursor.point.line = new_line;
+        self.cursor.point.col = new_col;
         self.input_needs_wrap = false;
     }
 
@@ -1792,14 +1805,32 @@ impl ansi::Handler for Term {
     #[inline]
     fn move_forward(&mut self, cols: Column) {
         trace!("Moving forward: {}", cols);
+        let old_col = self.cursor.point.col;
         self.cursor.point.col = min(self.cursor.point.col + cols, self.grid.num_cols() - 1);
+
+        self.damage = self.damage.max(&DamageRect{
+            x: old_col.0,
+            y: self.cursor.point.line.0,
+            end_x: self.cursor.point.col.0,
+            end_y: self.cursor.point.line.0,
+        });
+
         self.input_needs_wrap = false;
     }
 
     #[inline]
     fn move_backward(&mut self, cols: Column) {
         trace!("Moving backward: {}", cols);
+        let old_col = self.cursor.point.col;
         self.cursor.point.col -= min(self.cursor.point.col, cols);
+
+        self.damage = self.damage.max(&DamageRect{
+            x: self.cursor.point.col.0,
+            y: self.cursor.point.line.0,
+            end_x: old_col.0,
+            end_y: self.cursor.point.line.0,
+        });
+
         self.input_needs_wrap = false;
     }
 
@@ -1841,6 +1872,7 @@ impl ansi::Handler for Term {
     #[inline]
     fn put_tab(&mut self, mut count: i64) {
         trace!("Putting tab: {}", count);
+        let old_col = self.cursor.point.col;
 
         while self.cursor.point.col < self.grid.num_cols() && count != 0 {
             count -= 1;
@@ -1848,7 +1880,6 @@ impl ansi::Handler for Term {
             let cell = &mut self.grid[&self.cursor.point];
             if cell.c == ' ' {
                 cell.c = self.cursor.charsets[self.active_charset].map('\t');
-                self.damage = self.damage.add_point(&self.cursor.point);
             }
 
             loop {
@@ -1864,6 +1895,13 @@ impl ansi::Handler for Term {
             }
         }
 
+        self.damage = self.damage.max(&DamageRect{
+            x: old_col.0,
+            y: self.cursor.point.line.0,
+            end_x: self.cursor.point.col.0,
+            end_y: self.cursor.point.line.0,
+        });
+
         self.input_needs_wrap = false;
     }
 
@@ -1873,6 +1911,14 @@ impl ansi::Handler for Term {
         trace!("Backspace");
         if self.cursor.point.col > Column(0) {
             self.cursor.point.col -= 1;
+
+            self.damage = self.damage.max(&DamageRect{
+                x: self.cursor.point.col.0 + 1,
+                y: self.cursor.point.line.0,
+                end_x: self.cursor.point.col.0,
+                end_y: self.cursor.point.line.0,
+            });
+
             self.input_needs_wrap = false;
         }
     }
@@ -1881,6 +1927,13 @@ impl ansi::Handler for Term {
     #[inline]
     fn carriage_return(&mut self) {
         trace!("Carriage return");
+        self.damage = self.damage.max(&DamageRect{
+            x: 0,
+            y: self.cursor.point.line.0,
+            end_x: self.cursor.point.col.0,
+            end_y: self.cursor.point.line.0,
+        });
+
         self.cursor.point.col = Column(0);
         self.input_needs_wrap = false;
     }
@@ -1891,8 +1944,37 @@ impl ansi::Handler for Term {
         trace!("Linefeed");
         let next = self.cursor.point.line + 1;
         if next == self.scroll_region.end {
+            // scroll_up updates damage itself
             self.scroll_up(Line(1));
         } else if next < self.grid.num_lines() {
+            self.damage = self.damage.max(&DamageRect{
+                x: self.cursor.point.col.0,
+                y: self.cursor.point.line.0,
+                end_x: self.cursor.point.col.0,
+                end_y: self.cursor.point.line.0+1,
+            });
+
+            self.cursor.point.line += 1;
+        }
+    }
+
+    /// Linefeed and carriage return
+    #[inline]
+    fn linefeed_carriage_return(&mut self) {
+        trace!("Linefeed and carriage return");
+        let next = self.cursor.point.line + 1;
+        self.cursor.point.col = Column(0);
+        if next == self.scroll_region.end {
+            // scroll_up updates damage itself
+            self.scroll_up(Line(1));
+        } else if next < self.grid.num_lines() {
+            self.damage = self.damage.max(&DamageRect{
+                x: 0,
+                y: self.cursor.point.line.0,
+                end_x: self.cursor.point.col.0,
+                end_y: self.cursor.point.line.0+1,
+            });
+
             self.cursor.point.line += 1;
         }
     }
@@ -2037,6 +2119,7 @@ impl ansi::Handler for Term {
     fn move_backward_tabs(&mut self, count: i64) {
         trace!("Moving backward {} tabs", count);
 
+        let old_col = self.cursor.point.col;
         for _ in 0..count {
             let mut col = self.cursor.point.col;
             for i in (0..(col.0)).rev() {
@@ -2047,6 +2130,13 @@ impl ansi::Handler for Term {
             }
             self.cursor.point.col = col;
         }
+
+        self.damage = self.damage.max(&DamageRect{
+            x: self.cursor.point.col.0,
+            y: self.cursor.point.line.0,
+            end_x: old_col.0,
+            end_y: self.cursor.point.line.0,
+        })
     }
 
     #[inline]
@@ -2068,8 +2158,18 @@ impl ansi::Handler for Term {
         let source = if self.alt { &self.cursor_save_alt } else { &self.cursor_save };
 
         self.cursor = *source;
-        self.cursor.point.line = min(self.cursor.point.line, self.grid.num_lines() - 1);
-        self.cursor.point.col = min(self.cursor.point.col, self.grid.num_cols() - 1);
+        let new_line = min(self.cursor.point.line, self.grid.num_lines() - 1);
+        let new_col = min(self.cursor.point.col, self.grid.num_cols() - 1);
+
+        self.damage = self.damage.max(&DamageRect{
+            x: min(self.cursor.point.col.0, new_col.0),
+            y: min(self.cursor.point.line.0, new_line.0),
+            end_x: max(self.cursor.point.col.0, new_col.0),
+            end_y: max(self.cursor.point.line.0, new_line.0),
+        });
+
+        self.cursor.point.line = new_line;
+        self.cursor.point.col = new_col;
     }
 
     #[inline]
@@ -2192,6 +2292,7 @@ impl ansi::Handler for Term {
             },
             ansi::ClearMode::Saved => self.grid.clear_history(),
         }
+
         self.damage = DamageRect::whole_grid(&self.grid);
     }
 
@@ -2207,6 +2308,7 @@ impl ansi::Handler for Term {
                 self.tabs.clear_all();
             },
         }
+
         self.damage = DamageRect::whole_grid(&self.grid);
     }
 
@@ -2242,7 +2344,15 @@ impl ansi::Handler for Term {
         if self.cursor.point.line == self.scroll_region.start {
             self.scroll_down(Line(1));
         } else {
+            let old_line = self.cursor.point.line;
             self.cursor.point.line -= min(self.cursor.point.line, Line(1));
+
+            self.damage = self.damage.max(&DamageRect{
+                x: self.cursor.point.col.0,
+                y: self.cursor.point.line.0,
+                end_x: self.cursor.point.col.0,
+                end_y: old_line.0,
+            })
         }
     }
 
