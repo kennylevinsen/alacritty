@@ -107,6 +107,7 @@ pub struct Display {
     size_info: SizeInfo,
     last_message: Option<Message>,
     damage_supported: bool,
+    fully_damaged: bool,
 }
 
 /// Can wakeup the render loop from other threads
@@ -273,6 +274,7 @@ impl Display {
             size_info,
             last_message: None,
             damage_supported: damage_supported,
+            fully_damaged: false,
         })
     }
 
@@ -420,6 +422,7 @@ impl Display {
             self.font_size = terminal.font_size;
             self.last_message = terminal.message_buffer_mut().message();
             self.size_info.dpr = dpr;
+            self.fully_damaged = true;
         }
 
         if font_changed {
@@ -479,16 +482,42 @@ impl Display {
         let size_info = *terminal.size_info();
 
         // Check grid damage
-        let mut damage = if self.damage_supported {
-            let DamageRect{x, y, end_x, end_y} = terminal.get_damage();
-            let (x, y) = (if x > 1 { x-1 } else { 0 }, if y > 1 { y-1 } else { 0 });
-            let (end_x, end_y) = (min(end_x+2, terminal.grid().num_cols().0), min(end_y+2, terminal.grid().num_lines().0));
-            Some(Rect{
-                x: (x as u32 * size_info.cell_width as u32) + size_info.padding_x as u32,
-                y: size_info.height as u32 - (end_y as u32 * size_info.cell_height as u32) - size_info.padding_y as u32,
-                width: ((end_x-x) as u32 * size_info.cell_width as u32),
-                height: ((end_y-y) as u32 * size_info.cell_height as u32),
-            })
+        let damage = if self.damage_supported {
+            let (width, height, cell_width, cell_height, padding_x, padding_y) = size_info.to_u32();
+
+            if self.fully_damaged {
+                // We need to fully damaged, so let's clear damage and stop
+                // here.
+                terminal.get_damage();
+                self.fully_damaged = false;
+                Some(Rect{
+                    x: 0,
+                    y: 0,
+                    width: width,
+                    height: height,
+                })
+            } else {
+                // Fetch and clear damage
+                let DamageRect{x, y, end_x, end_y} = terminal.get_damage();
+                let (x, y, end_x, end_y) = (x as u32, y as u32, (end_x + 1) as u32, (end_y + 1) as u32);
+
+                // Then, convert the grid to a rect in gl coordinates
+                let rect = Rect{
+                    x: x * cell_width + padding_x,
+                    y: height - end_y * cell_height - padding_y,
+                    width: (end_x-x) * cell_width,
+                    height: (end_y-y) * cell_height,
+                };
+
+                // And finally, add half a cell of horizontal, quarter of a
+                // cell of vertical padding to cover overdraw.
+                Some(Rect{
+                    x: rect.x.saturating_sub(cell_width/2),
+                    y: rect.y.saturating_sub(cell_height/4),
+                    width: min(width, rect.width + cell_width),
+                    height: min(height, rect.height + cell_height / 2),
+                })
+            }
         } else {
             None
         };
@@ -590,13 +619,6 @@ impl Display {
                     });
                     offset += 1;
                 }
-
-                damage = Some(Rect{
-                    x: 0,
-                    y: 0,
-                    width: size_info.width as u32,
-                    height: size_info.height as u32,
-                });
             } else {
                 // Draw rectangles
                 self.renderer.draw_rects(config, &size_info, visual_bell_intensity, rects);

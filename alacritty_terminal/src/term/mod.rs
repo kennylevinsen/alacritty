@@ -882,6 +882,16 @@ impl SizeInfo {
             col: min(col, Column(self.cols().saturating_sub(1))),
         }
     }
+
+    #[inline(always)]
+    pub fn to_u32(&self) -> (u32, u32, u32, u32, u32, u32) {
+        (self.width as u32,
+            self.height as u32,
+            self.cell_width as u32,
+            self.cell_height as u32,
+            self.padding_x as u32,
+            self.padding_y as u32)
+    }
 }
 
 impl Term {
