@@ -482,7 +482,7 @@ impl Display {
         let mut damage = if self.damage_supported {
             let DamageRect{x, y, end_x, end_y} = terminal.get_damage();
             let (x, y) = (if x > 1 { x-1 } else { 0 }, if y > 1 { y-1 } else { 0 });
-            let (end_x, end_y) = (min(end_x+2, terminal.grid().num_cols().0-1), min(end_y+2, terminal.grid().num_lines().0-1));
+            let (end_x, end_y) = (min(end_x+2, terminal.grid().num_cols().0), min(end_y+2, terminal.grid().num_lines().0));
             Some(Rect{
                 x: (x as u32 * size_info.cell_width as u32) + size_info.padding_x as u32,
                 y: size_info.height as u32 - (end_y as u32 * size_info.cell_height as u32) - size_info.padding_y as u32,
