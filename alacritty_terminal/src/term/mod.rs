@@ -889,7 +889,7 @@ impl Term {
         &self.grid.selection
     }
 
-    fn add_selection(&self, s: &Option<Selection>, r: &DamageRect) -> DamageRect {
+    fn add_selection(&self, cols: index::Column, s: &Option<Selection>, r: &DamageRect) -> DamageRect {
         let s = match s {
             Some(ref s) => s,
             None => return r.clone(),
@@ -914,21 +914,21 @@ impl Term {
             start.col = max(limit_start, start.col);
             end.col = min(limit_end, end.col);
 
-            let start = Point{
-                col: start.col,
-                line: index::Line(start.line),
-            };
-            let end = Point{
-                col: end.col,
-                line: index::Line(end.line),
-            };
-
-            r.max(&DamageRect{
-                x: start.col.0,
-                y: start.line.0,
-                end_x: end.col.0,
-                end_y: end.line.0,
-            })
+            if start.line == end.line {
+                r.max(&DamageRect{
+                    x: start.col.0,
+                    y: start.line,
+                    end_x: end.col.0,
+                    end_y: end.line,
+                })
+            } else {
+                r.max(&DamageRect{
+                    x: 0,
+                    y: start.line,
+                    end_x: cols.0-1,
+                    end_y: end.line,
+                })
+            }
         } else {
             r.clone()
         }
@@ -1068,11 +1068,12 @@ impl Term {
     }
 
     pub fn get_damage(&mut self) -> DamageRect {
+        let cols = self.grid.num_cols();
         let mut r = self.damage.add_point(&self.cursor.point);
-        r = self.add_selection(&self.last_selection, &r);
-        r = self.add_selection(&self.grid.selection, &r);
-        r = self.add_highlight(self.grid.num_cols(), &self.last_highlight, &r);
-        r = self.add_highlight(self.grid.num_cols(), &self.grid.url_highlight, &r);
+        r = self.add_selection(cols, &self.last_selection, &r);
+        r = self.add_selection(cols, &self.grid.selection, &r);
+        r = self.add_highlight(cols, &self.last_highlight, &r);
+        r = self.add_highlight(cols, &self.grid.url_highlight, &r);
         self.damage = DamageRect::new(&self.cursor.point);
         self.last_selection = self.grid.selection.clone();
         self.last_highlight = self.grid.url_highlight.clone();
