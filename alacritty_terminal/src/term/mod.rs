@@ -960,12 +960,12 @@ impl Term {
     pub fn scroll_display(&mut self, scroll: Scroll) {
         let old_offset = self.grid.display_offset();
         self.grid.scroll_display(scroll);
+        self.reset_url_highlight();
+        self.reset_mouse_cursor();
+        self.dirty = true;
         if self.grid.display_offset() != old_offset {
-            self.reset_url_highlight();
-            self.reset_mouse_cursor();
             self.damage = DamageRect::whole_grid(&self.grid);
         }
-        self.dirty = true;
     }
 
     #[inline]
