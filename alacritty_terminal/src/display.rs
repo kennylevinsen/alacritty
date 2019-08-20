@@ -482,8 +482,8 @@ impl Display {
             let DamageRect{x, y, end_x, end_y} = terminal.get_damage();
             let (end_x, end_y) = (end_x+1, end_y+1);
             Some(Rect{
-                x: (x as u32 * size_info.cell_width as u32) + 2,
-                y: size_info.height as u32 - (end_y as u32 * size_info.cell_height as u32) - 2,
+                x: (x as u32 * size_info.cell_width as u32) + size_info.padding_x as u32,
+                y: size_info.height as u32 - (end_y as u32 * size_info.cell_height as u32) - size_info.padding_y as u32,
                 width: ((end_x-x) as u32 * size_info.cell_width as u32),
                 height: ((end_y-y) as u32 * size_info.cell_height as u32),
             })
