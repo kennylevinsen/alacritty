@@ -372,18 +372,22 @@ impl Display {
         config: &Config,
     ) {
         let grid_cells: Vec<RenderableCell> = terminal.renderable_cells(config).collect();
+        let visual_bell_animating = terminal.visual_bell.animating();
         let visual_bell_intensity = terminal.visual_bell.intensity();
         let background_color = terminal.background_color();
         let metrics = self.glyph_cache.font_metrics();
         let glyph_cache = &mut self.glyph_cache;
         let size_info = self.size_info;
 
+        // Clear the terminal dirty bit if we do not have an ongoing animation.
+        terminal.dirty = visual_bell_animating;
+
         // Check grid damage
         let damage: Option<Vec<Rect>> = if self.damage_supported {
             let (width, height, cell_width, cell_height, padding_x, padding_y) =
                 size_info.into_u32();
 
-            if self.fully_damaged {
+            if self.fully_damaged || visual_bell_animating {
                 // We need to fully damaged, so let's clear damage and stop
                 // here.
                 terminal.clear_damage();

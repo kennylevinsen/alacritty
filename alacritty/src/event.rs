@@ -426,9 +426,6 @@ impl<N: Notify> Processor<N> {
             }
 
             if terminal.dirty {
-                // Clear dirty flag
-                terminal.dirty = !terminal.visual_bell.completed();
-
                 // Redraw screen
                 self.display.draw(terminal, &self.message_buffer, &self.config);
             }
