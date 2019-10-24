@@ -827,6 +827,9 @@ pub struct Term<T> {
     /// Last URL highlight, stored for damage tracking
     last_highlight: Option<RangeInclusive<index::Linear>>,
 
+    /// Whether or not damage should be tracked. Disabling this may save some processing overhead.
+    track_damage: bool,
+
     /// Currently open damage rect
     damage: DamageRect,
 
@@ -1019,6 +1022,7 @@ impl<T> Term<T> {
             title_stack: Vec::new(),
             last_highlight: None,
             last_selection: None,
+            track_damage: false,
             damage: Default::default(),
             damage_list: Vec::with_capacity(10),
         }
@@ -1081,6 +1085,12 @@ impl<T> Term<T> {
         self.last_highlight = self.grid.url_highlight.clone();
 
         damage_list
+    }
+
+    /// Sets whether or not damage should be tracked. Resize must be called
+    /// afterwards to clear damage properly.
+    pub fn track_damage(&mut self, enabled: bool) {
+        self.track_damage = enabled;
     }
 
     /// Clears damage.
@@ -1744,7 +1754,9 @@ impl<T: EventListener> ansi::Handler for Term<T> {
         let line = min(line + y_offset, max_y);
         let col = min(col, self.grid.num_cols() - 1);
 
-        self.update_damage(line, col);
+        if self.track_damage {
+            self.update_damage(line, col);
+        }
 
         self.cursor.point.line = line;
         self.cursor.point.col = col;

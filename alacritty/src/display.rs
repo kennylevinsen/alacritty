@@ -350,6 +350,7 @@ impl Display {
         pty_resize_handle.on_resize(&pty_size);
 
         // Resize terminal
+        terminal.track_damage(self.damage_supported);
         terminal.resize(&pty_size);
 
         // Resize renderer
