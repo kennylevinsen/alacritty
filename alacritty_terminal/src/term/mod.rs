@@ -729,7 +729,7 @@ pub struct Damage {
 
 impl Damage {
     #[inline(always)]
-    fn new(lines: Line, num_cols: Column) -> Damage {
+    pub fn new(lines: Line, num_cols: Column) -> Damage {
         let mut damage =
             Damage { line_damage: Vec::with_capacity(lines.0), damage_all: false, num_cols };
         for line in 0..lines.0 {

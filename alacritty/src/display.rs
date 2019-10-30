@@ -36,7 +36,7 @@ use alacritty_terminal::meter::Meter;
 use alacritty_terminal::renderer::rects::{RenderLines, RenderRect};
 use alacritty_terminal::renderer::{self, GlyphCache, QuadRenderer};
 use alacritty_terminal::term::color::Rgb;
-use alacritty_terminal::term::{RenderableCell, SizeInfo, Term};
+use alacritty_terminal::term::{RenderableCell, SizeInfo, Term, Damage};
 
 use crate::config::Config;
 use crate::event::{FontResize, Resize};
@@ -380,7 +380,6 @@ impl Display {
         let metrics = self.glyph_cache.font_metrics();
         let glyph_cache = &mut self.glyph_cache;
         let size_info = self.size_info;
-        let cols = size_info.cols();
 
         // Request immediate re-draw if visual bell animation is not finished
         if visual_bell_animating {
@@ -388,67 +387,12 @@ impl Display {
         }
 
         // Check grid damage
-        let damage: Option<Vec<Rect>> = if self.damage_supported {
-            let (width, height, cell_width, cell_height, padding_x, padding_y) =
-                size_info.into_u32();
-
-            if self.fully_damaged || visual_bell_animating || config.render_timer() {
-                // We need to fully damage, so let's clear damage and stop here
-                terminal.reset_damage();
-                self.fully_damaged = false;
-                None
-            } else {
-                // Fetch and clear damage
-                let term_damage = terminal.get_damage();
-                if term_damage.damage_all {
-                    terminal.reset_damage();
-                    None
-                } else {
-                    let mut rects = Vec::with_capacity(term_damage.line_damage.len());
-                    for line in term_damage.line_damage.iter_mut() {
-                        if line.is_undamaged() {
-                            continue;
-                        }
-
-                        // Make end coordinates be lower right corner instead of upper
-                        // left. Also add one more to end_x to compensate for the
-                        // possibility of the end position being a double width
-                        // character.
-                        let (x, y, end_x, end_y) = (
-                            line.left.0 as u32,
-                            line.line.0 as u32,
-                            (line.right.0 + 2) as u32,
-                            (line.line.0 + 1) as u32,
-                        );
-
-                        // Then, convert the grid to a rect in gl coordinates
-                        let rect = Rect {
-                            x: x * cell_width + padding_x,
-                            y: height - end_y * cell_height - padding_y,
-                            width: (end_x - x) * cell_width,
-                            height: (end_y - y) * cell_height,
-                        };
-
-                        // And finally, add half a cell of horizontal, quarter of a
-                        // cell of vertical padding to cover overdraw.
-                        let x = rect.x.saturating_sub(cell_width / 2);
-                        let y = rect.y.saturating_sub(cell_height / 4);
-                        rects.push(Rect {
-                            x,
-                            y,
-                            width: min(width - x, rect.width + cell_width),
-                            height: min(height - y, rect.height + cell_height / 2),
-                        });
-                        line.reset(cols);
-                    }
-                    term_damage.damage_all = false;
-                    terminal.damage_cursor();
-                    Some(rects)
-                }
-            }
-        } else {
-            None
-        };
+        let mut term_damage = Damage::new(size_info.lines(), size_info.cols());
+        if self.damage_supported {
+            let mut new_damage = terminal.get_damage();
+            std::mem::swap(&mut term_damage, &mut new_damage);
+            terminal.damage_cursor();
+        }
 
         // Update IME position
         #[cfg(not(windows))]
@@ -535,11 +479,60 @@ impl Display {
                 api.render_string(&timing[..], size_info.lines() - 2, glyph_cache, Some(color));
             });
         }
-        if let Some(damage) = damage {
-            self.window.swap_buffers_with_damage(&damage);
-        } else {
+
+        if !self.damage_supported ||
+            self.fully_damaged ||
+            term_damage.damage_all ||
+            visual_bell_animating ||
+            config.render_timer()
+        {
+            self.fully_damaged = false;
             self.window.swap_buffers();
+            return;
         }
+
+        // Fetch and clear damage
+        let mut rects = Vec::with_capacity(term_damage.line_damage.len());
+
+        let (width, height, cell_width, cell_height, padding_x, padding_y) =
+            size_info.into_u32();
+
+        for line in term_damage.line_damage.into_iter() {
+            if line.is_undamaged() {
+                continue;
+            }
+
+            // Make end coordinates be lower right corner instead of upper
+            // left. Also add one more to end_x to compensate for the
+            // possibility of the end position being a double width
+            // character.
+            let (x, y, end_x, end_y) = (
+                line.left.0 as u32,
+                line.line.0 as u32,
+                (line.right.0 + 2) as u32,
+                (line.line.0 + 1) as u32,
+            );
+
+            // Then, convert the grid to a rect in gl coordinates
+            let rect = Rect {
+                x: x * cell_width + padding_x,
+                y: height - end_y * cell_height - padding_y,
+                width: (end_x - x) * cell_width,
+                height: (end_y - y) * cell_height,
+            };
+
+            // And finally, add half a cell of horizontal, quarter of a
+            // cell of vertical padding to cover overdraw.
+            let x = rect.x.saturating_sub(cell_width / 2);
+            let y = rect.y.saturating_sub(cell_height / 4);
+            rects.push(Rect {
+                x,
+                y,
+                width: min(width - x, rect.width + cell_width),
+                height: min(height - y, rect.height + cell_height / 2),
+            });
+        }
+        self.window.swap_buffers_with_damage(&rects);
     }
 }
 
